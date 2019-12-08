@@ -37,6 +37,8 @@ static httpd_uri_t* httpd_find_uri_handler2(httpd_err_resp_t *err, struct httpd_
                  * error is to be neglected */
                 *err = HTTPD_405_METHOD_NOT_ALLOWED;
                 }
+                
+                
             }
         }
     if (*err == 0) {
