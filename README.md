@@ -1,8 +1,7 @@
-# Play MP3 files from microSD with touch pad control 
+#Play MP3/Flac Files and WIFI AP SDCard server
 
-The demo plays MP3 files stored on the SD card using audio pipeline API.
+Long press to start/stop WIFI AP - server is on 1.2.3.4
 
-The playback control is done using ESP32 touch pad functionality. User can start, stop, pause, resume playback and advance to the next song as well as adjust volume. When playing, the application automatically advances to the next song once previous finishes.
 
 To run this example you need ESP32 LyraT or compatible board:
 
@@ -12,7 +11,7 @@ To run this example you need ESP32 LyraT or compatible board:
 
 You need to modify adf/components/esp_http_server/src/httpd_uri.c so it can handle wildcard pages:
 
-
+#Mod Code
 
 static httpd_uri_t* httpd_find_uri_handler2(httpd_err_resp_t *err,
     struct httpd_data *hd,
