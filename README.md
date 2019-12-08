@@ -1,8 +1,10 @@
-# ESP32-MP3-WIFI-AP
-simple mp3 player and wifi ap sdcard server
+# Play MP3 files from microSD with touch pad control 
 
+The demo plays MP3 files stored on the SD card using audio pipeline API.
 
-Plays MP3 and FLAC files from SD-CARD
+The playback control is done using ESP32 touch pad functionality. User can start, stop, pause, resume playback and advance to the next song as well as adjust volume. When playing, the application automatically advances to the next song once previous finishes.
 
-Long pressing a button starts up a WIFI AP HTTP Server on 1.2.3.4 - displays esp board info and allows you to explore the sdcard
-and allows you to download/play files from the server.
+To run this example you need ESP32 LyraT or compatible board:
+
+- Connect speakers or headphones to the board. 
+- Insert a microSD card loaded with a MP3 files 'test.mp3', 'test1.mp3' and 'test2.mp3' into board's slot.
