@@ -2,21 +2,18 @@
 
 Long press to start/stop WIFI AP - server is on 1.2.3.4
 
-
-To run this example you need ESP32 LyraT or compatible board:
-
-- Connect speakers or headphones to the board. 
-- Insert a microSD card loaded with a MP3 files 'test.mp3', 'test1.mp3' and 'test2.mp3' into board's slot.
+rec = pause
+mode = new random file
+play = previous file
+set = next file
+vol+ vol- = volume
 
 
 You need to modify adf/components/esp_http_server/src/httpd_uri.c so it can handle wildcard pages:
 
 #Mod Code
 
-static httpd_uri_t* httpd_find_uri_handler2(httpd_err_resp_t *err,
-    struct httpd_data *hd,
-    const char *uri, size_t uri_len,
-    httpd_method_t method)
+static httpd_uri_t* httpd_find_uri_handler2(httpd_err_resp_t *err, struct httpd_data *hd,   const char *uri, size_t uri_len,   httpd_method_t method)
     {
     *err = 0;
     for (int i = 0; i < hd->config.max_uri_handlers; i++)
