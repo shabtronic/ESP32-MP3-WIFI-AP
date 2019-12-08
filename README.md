@@ -1,4 +1,4 @@
-#Play MP3/Flac Files and WIFI AP SDCard server
+# Play MP3/Flac Files and WIFI AP SDCard server
 
 Long press to start/stop WIFI AP - server is on 1.2.3.4
 
@@ -11,8 +11,8 @@ vol+ vol- = volume
 
 You need to modify adf/components/esp_http_server/src/httpd_uri.c so it can handle wildcard pages:
 
-#Mod Code
-
+# Mod Code
+```
 static httpd_uri_t* httpd_find_uri_handler2(httpd_err_resp_t *err, struct httpd_data *hd,   const char *uri, size_t uri_len,   httpd_method_t method)
     {
     *err = 0;
@@ -46,3 +46,4 @@ static httpd_uri_t* httpd_find_uri_handler2(httpd_err_resp_t *err, struct httpd_
         }
     return NULL;
     }
+```
