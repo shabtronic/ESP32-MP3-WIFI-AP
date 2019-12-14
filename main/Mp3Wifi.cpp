@@ -10,6 +10,7 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "freertos/event_groups.h"
+#include "freertos/timers.h"
 #include "esp_spiram.h"
 #include "nvs_flash.h"
 #include "esp_audio.h"
@@ -53,10 +54,16 @@
 #include <stdarg.h> 
 #include "esp_pm.h"
 #include <esp_http_server.h>
+#include "oled.h"
+#include "zjlogo.h"
+#include "esp_event_legacy.h"
+#include "equalizer.h"
+#include "math.h"
 volatile static int SpinLock = 0;
-
-
-
+short DspBuf[4096];
+OLED display(0x3C, 21, 22, 132, 64, OLED::tDriver::SH1106);
+void DisplayStatus();
+void DrawImage(int x, int y, int w, int h, unsigned char* data);
 // Profile fun! microseconds to seconds
 double GetTime() { return (double)esp_timer_get_time() / 1000000; }
 
@@ -64,7 +71,7 @@ double GetTime() { return (double)esp_timer_get_time() / 1000000; }
 #define vec std::vector
 static int file_index = 0;
 vec<str> Mp3Files;
-
+vec<str> WifiAPMacs;
 static const char *TAG = "Aud1oW1f1AP";
 // A1S has 2 GPIO Red LEDs
 #define BLINK_GPIO_GREEN 22
@@ -127,16 +134,25 @@ static esp_err_t event_handler(void *ctx, system_event_t *event)
 	switch (event->event_id)
 		{
 		case SYSTEM_EVENT_STA_START:
+			printf("STA Start\n");
 			ESP_ERROR_CHECK(esp_wifi_connect());
 			break;
 		case SYSTEM_EVENT_STA_DISCONNECTED:
+			printf("STA Connected\n");
 			esp_wifi_connect();
 			break;
 		case SYSTEM_EVENT_STA_GOT_IP:
+			printf("STA Got IP\n");
 			break;
 		case SYSTEM_EVENT_AP_STACONNECTED:
-			break;
+		{
+		system_event_ap_staconnected_t tt = (system_event_ap_staconnected_t)event->event_info.sta_connected;
+		WifiAPMacs.push_back(string_format("Mac: %2X%2X%2X%2X%2X%2X\n", tt.mac[0], tt.mac[1], tt.mac[2], tt.mac[3], tt.mac[4], tt.mac[5]));
+		}
+		break;
 		case SYSTEM_EVENT_AP_STADISCONNECTED:
+			WifiAPMacs.clear();
+			printf("AP_STA Disconnected\n");
 			esp_wifi_deauth_sta(0);
 			break;
 		default:
@@ -261,7 +277,7 @@ void WiFIInit()
 
 
 
-#define Mp3StackSize 256
+#define Mp3StackSize 1024
 int Mp3Stack[Mp3StackSize];
 int Mp3StackPos = 0;
 FRESULT scan_files(str path, vec<str> &list, bool recurse, bool filesonly = true)
@@ -336,7 +352,7 @@ void SendFile(httpd_req_t *req, str filename)
 			{
 			if (fsize > psize)
 				{
-				fread(buf,  psize,1, F);
+				fread(buf, psize, 1, F);
 				if (httpd_resp_send_chunk(req, buf, psize) != ESP_OK)
 					fsize = 0;
 				else
@@ -344,7 +360,7 @@ void SendFile(httpd_req_t *req, str filename)
 				}
 			else
 				{
-				fread(buf,  fsize,1, F);
+				fread(buf, fsize, 1, F);
 				httpd_resp_send_chunk(req, buf, fsize);
 				fsize = 0;
 				}
@@ -446,7 +462,7 @@ static httpd_handle_t start_webserver(void)
 	{
 	httpd_handle_t server = NULL;
 	httpd_config_t config = HTTPD_DEFAULT_CONFIG();
-	httpd_start(&server, &config) ;
+	httpd_start(&server, &config);
 	httpd_register_uri_handler(server, &hello);
 	return server;
 	}
@@ -457,10 +473,10 @@ static void stop_webserver(httpd_handle_t server)
 	}
 
 static httpd_handle_t server = NULL;
-
+static bool WifiRunning = false;
 void WifiAPServer(audio_pipeline_handle_t &pipeline)
 	{
-	static bool WifiRunning = false;
+
 	if (!WifiRunning)
 		{
 		esp_wifi_start();
@@ -476,10 +492,11 @@ void WifiAPServer(audio_pipeline_handle_t &pipeline)
 		gpio_set_level((gpio_num_t)BLINK_GPIO_GREEN, (gpio_num_t)1);
 		}
 	WifiRunning = !WifiRunning;
+	//DisplayStatus();
 	}
 
 
-
+static volatile float SongTime = 0;
 static FILE *get_file(int next_file)
 	{
 	static FILE *file = NULL;
@@ -501,8 +518,12 @@ static FILE *get_file(int next_file)
 
 		file_index = Mp3Stack[Mp3StackPos];
 		printf("<<<< %s >>>>\n", Mp3Files[file_index].c_str());
+		//	DisplayStatus();
+
+
 		file = fopen(("/sdcard" + Mp3Files[file_index]).c_str(), "r");
 		LastPos = Mp3StackPos;
+		SongTime = 0;
 		if (!file)
 			{
 			printf("Error opening file\n");
@@ -517,7 +538,7 @@ static FILE *get_file(int next_file)
  * Callback function to feed audio data stream from sdcard to mp3 decoder element
  */
 audio_pipeline_handle_t pipeline;
-audio_element_handle_t audio_decoder, flac_decoder, mp3_decoder, i2s_stream_writer;
+audio_element_handle_t audio_decoder, flac_decoder, mp3_decoder, i2s_stream_writer,DspProcessor;
 audio_event_iface_handle_t evt;
 
 audio_element_err_t my_sdcard_read_cb(audio_element_handle_t el, char *buf, int len, unsigned int wait_time, void *ctx)
@@ -551,61 +572,258 @@ void SetDecoder(audio_pipeline_handle_t &pipeline)
 
 	if (strstr(Mp3Files[Mp3Stack[Mp3StackPos]].c_str(), (const char*)".mp3"))
 		{
-		//	printf("Changing Decoder to mp3.\n");
 		audio_decoder = mp3_decoder;
-		//		audio_element_reset_state(audio_decoder);
-				//audio_element_reset_state(i2s_stream_writer);
-
-		const char * boomer[]{ "mp3Decoder", "i2s" };
-		audio_pipeline_relink(pipeline, boomer, 2);
+		const char * boomer[]{ "mp3Decoder","DspProcessor", "i2s" };
+		audio_pipeline_relink(pipeline, boomer, 3);
 		audio_pipeline_set_listener(pipeline, evt);
-		//	printf("Finished decoder change!\n");
-
 		}
 	else
 		{
-		//	printf("Changing Decoder to flac.\n");
 		audio_decoder = flac_decoder;
-		//	audio_element_force_set_state(audio_decoder, AEL_STATE_PAUSED)
-		//audio_element_reset_state(audio_decoder);
-
-		const char * boomer[]{ "flacDecoder", "i2s" };
-		audio_pipeline_relink(pipeline, boomer, 2);
+		const char * boomer[]{ "flacDecoder", "DspProcessor","i2s" };
+		audio_pipeline_relink(pipeline, boomer, 3);
 		audio_pipeline_set_listener(pipeline, evt);
-		//printf("Finished decoder change!\n");
 		}
 
-	//audio_pipeline_reset_items_state(pipeline);
-//	audio_element_reset_state(audio_decoder);
-//	audio_element_reset_state(i2s_stream_writer);
 	audio_element_run(audio_decoder);
+	}
+float fps = 20;
+int player_volume = 5;
+const float DisplayTimeout = 60;
+static float DisplayOn = DisplayTimeout;
+float asx = 2;
+float tsx = 2;
+float asy = 200;
+float tsy = 0;
+float gClearTime;
+float gRenderTime;
+float gBlitTime;
+static bool SongPause = false;
+const int NumStars = 200;
+int StarFieldx[NumStars];
+int StarFieldy[NumStars];
+bool SFInit = false;
+bool ShouldDraw(float xoff)
+	{
+	if ((asx >= (xoff - 64)) && ((asx <= xoff + 64))) return true;
+	return false;
+	}
+// Audio Player , Recorder, Wifi ,System, Clock, Timer, Alexa, Game, Multi Track, Synth, Drums
 
-	//audio_pipeline_change_state(pipeline, AEL_STATE_INIT);
+void DrawAlexa(float dt, float xoff)
+	{
+	if (!ShouldDraw(xoff)) return;
+	display.draw_string(xoff - asx, asy, "Alexa", OLED::tSize::DOUBLE_SIZE);
+	//display.printf(asx - xoff, asy + OLED_FONT_HEIGHT * 2, "Blit: %2.3f\n", gBlitTime);
+	//display.printf(asx - xoff, asy + OLED_FONT_HEIGHT * 3, "FPS %2.1f\n", 1.0f / dt);
+
+	}
+
+void DrawClock(float dt, float xoff)
+	{
+	if (!ShouldDraw(xoff)) return;
+	display.draw_string(xoff - asx, asy, "Clock", OLED::tSize::DOUBLE_SIZE);
+	//display.printf(asx - xoff, asy + OLED_FONT_HEIGHT * 2, "Time: %2.1f", GetTime());
+	display.printf(xoff - asx + OLED_FONT_WIDTH * 7, asy + OLED_FONT_HEIGHT * 5, "%02d:%02d:%02d ", (int)GetTime() / (60 * 60), ((int)GetTime() / 60) % 60, (int)GetTime() % 60);
+
+	//display.printf(asx - xoff, asy + OLED_FONT_HEIGHT * 2, "Blit: %2.3f\n", gBlitTime);
+	//display.printf(asx - xoff, asy + OLED_FONT_HEIGHT * 3, "FPS %2.1f\n", 1.0f / dt);
+
+	}
+
+void DrawSystem(float dt, float xoff)
+	{
+	if (!ShouldDraw(xoff)) return;
+	display.draw_string(xoff - asx, asy, "System", OLED::tSize::DOUBLE_SIZE);
+	display.printf(xoff - asx, asy + OLED_FONT_HEIGHT * 2, "Blit: %2.3f\n", gBlitTime);
+	display.printf(xoff - asx, asy + OLED_FONT_HEIGHT * 3, "FPS %2.1f\n", 1.0f / dt);
+
+	}
+
+void DrawWifi(float dt, float xoff)
+	{
+	if (!ShouldDraw(xoff)) return;
+	display.draw_string(xoff - asx, asy, "Wifi-AP", OLED::tSize::DOUBLE_SIZE);
+	if (WifiRunning)
+		{
+		static int flash = 0;
+		flash++;
+		if (flash & 1)
+			DrawImage(xoff - asx + 128 - 16, asy, 16, 16, (unsigned char*)wifi16x16_map);
+
+		display.draw_string(xoff - asx, +OLED_FONT_HEIGHT * 2, "Server on 1.2.3.4");
+		display.printf(xoff - asx, +OLED_FONT_HEIGHT * 4, "Connections: %d", WifiAPMacs.size());
+		for (int a=0;a< WifiAPMacs.size();a++)
+		display.draw_string(xoff - asx, +OLED_FONT_HEIGHT * 6+a, WifiAPMacs[a].c_str());
+		}
+	}
+void DrawRecorder(float dt, float xoff)
+	{
+	if (!ShouldDraw(xoff)) return;
+	display.draw_string(xoff - asx, asy, "Recorder", OLED::tSize::DOUBLE_SIZE);
+
+	}
+void DrawAudioPlayer(float dt, float xoff)
+	{
+	if (!ShouldDraw(xoff)) return;
+	//for (int a = 0; a < NumStars; a++)
+	//	{
+	//	StarFieldx[a] = (StarFieldx[a] + (a & 7) + 1) & 255;
+	//	display.draw_pixel(StarFieldx[a] >> 1, StarFieldy[a]);
+	//	}
+	int pval = 32 * DspBuf[0 * 2 * 2] / 32767;
+
+	for (int a = 1; a < 128; a++)
+		{
+		int val=32*(DspBuf[a*2*8]+ DspBuf[-1+a * 2 * 8] )/(2*32768);
+		int xval = 32+(a&1);
+		int dv = abs(val)/2;
+		while (dv--)
+			{
+			display.draw_pixel(a, xval);
+			if (xval < (val+32)) xval += 2;
+			if (xval > (val+32)) xval -= 2;		
+			}
+		display.draw_line(a - 1, pval+32, a, val+32);
+		pval = val;
+		//display.draw_pixel(a, val + 32);
+		}
+
+	display.draw_string(xoff - asx, asy, "Music", OLED::tSize::DOUBLE_SIZE);
+	display.printf(xoff - asx + OLED_FONT_WIDTH * 14, asy + OLED_FONT_HEIGHT * 0.5, "Vol %d\n", player_volume);
+	display.printf(xoff - asx, asy + OLED_FONT_HEIGHT * 2, "%s", Mp3Files[file_index].c_str());
+	//display.printf(asx , asy + OLED_FONT_HEIGHT * 6, "ASX %2.1f TSX %2.1f\n",asx,tsx);
+
+	display.printf(xoff - asx + OLED_FONT_WIDTH * 3.5, asy + OLED_FONT_HEIGHT * 7, "Song: %02d:%02d:%02d ", (int)SongTime / (60 * 60), ((int)SongTime / 60) % 60, (int)SongTime % 60);
+
+	}
+void DisplayStatus(float dt)
+	{
+	asx += (tsx - asx)*0.4;
+	asy += (tsy - asy)*0.4;
+	display.clear();
+	DrawAudioPlayer(dt, 2);
+	DrawRecorder(dt, 128 * 1 + 2);
+	DrawWifi(dt, 128 * 2 + 2);
+	DrawSystem(dt, 128 * 3 + 2);
+	DrawClock(dt, 128 * 4 + 2);
+	DrawAlexa(dt, 128 * 5 + 2);
+
+	float	st = GetTime();
+	display.display();
+	gBlitTime = GetTime() - st;
+	st = GetTime();
+	}
+
+float LastTime = 0;
+static void display_timer_handler(xTimerHandle tmr)
+	{
+	float TimeDelta = GetTime() - LastTime;
+	if (!SongPause)
+		SongTime += TimeDelta;
+	DisplayOn -= TimeDelta;
+	LastTime = GetTime();
+	if (DisplayOn < 2)
+		tsy = 140;
+	else
+		tsy = 0;
+	if (DisplayOn > 0)
+		{
+		display.set_power(true);
+		DisplayStatus(TimeDelta);
+		}
+	else
+		{
+		display.set_power(false);
+
+		}
+	}
+
+void DrawImage(int x, int y, int w, int h, unsigned char* data)
+	{
+	for (int b = 0; b < h; b++)
+		for (int a = 0; a < w; a += 8)
+			{
+			unsigned char c = *data++;
+			if (c & 1)	display.draw_pixel(x + a + 7, y + b);
+			if (c & 2)	display.draw_pixel(x + a + 6, y + b);
+			if (c & 4)	display.draw_pixel(x + a + 5, y + b);
+			if (c & 8)	display.draw_pixel(x + a + 4, y + b);
+			if (c & 16)	display.draw_pixel(x + a + 3, y + b);
+			if (c & 32)	display.draw_pixel(x + a + 2, y + b);
+			if (c & 64)	display.draw_pixel(x + a + 1, y + b);
+			if (c & 128)	display.draw_pixel(x + a + 0, y + b);
+
+			}
+	}
+
+audio_element_info_t Dsp_info = { 0 };
+static esp_err_t Dsp_open(audio_element_handle_t self)
+	{
+	printf("Dsp_open!\n");
+	audio_element_getinfo(self, &Dsp_info);	
+	return ESP_OK;
+	}
+
+static esp_err_t Dsp_close(audio_element_handle_t self)
+	{
+	printf("Dsp_close!\n");
+	return ESP_OK;
+	}
+
+audio_element_err_t Dsp_read(audio_element_handle_t el, char *buf, int len, unsigned int wait_time, void *ctx)
+	{
+	printf("Dsp read Buf Size: %d\n", len);
+	return (audio_element_err_t)len;
+	}
+
+audio_element_err_t Dsp_write(audio_element_handle_t el, char *buf, int len, unsigned int wait_time, void *ctx)
+	{
+	printf("Dsp write Buf Size: %d\n", len);
+	return (audio_element_err_t)len;
 	}
 
 
+static audio_element_err_t Dsp_process(audio_element_handle_t self, char *inbuf, int len)
+	{
+	audio_element_input(self, (char *)DspBuf, len);
+	int ret = audio_element_output(self, (char *)DspBuf, len);
+//	printf("Dsp Process Buf Size: %d Channels: %d Values: %d %d %d %d\n", len, Dsp_info.channels,buf[0], buf[1], buf[2], buf[3]);
+	return (audio_element_err_t)ret;
+	}
+static esp_err_t Dsp_destroy(audio_element_handle_t self)
+	{
+	//equalizer_t *equalizer = (equalizer_t *)audio_element_getdata(self);
+	//audio_free(equalizer);
+	return ESP_OK;
+	}
 
 void app_main(void)
 	{
+
+	for (int a = 0; a < NumStars; a++)
+		{
+		StarFieldx[a] = rand() & 255;
+		StarFieldy[a] = rand() & 63;
+		}
+	display.begin();
+	display.setTTYMode(false);
+	display.clear();
+	//	display.draw_string(0, 0, "Audio Player V1.0");
+
+	DrawImage(0, 0, 128, 64, (unsigned char*)zjlogo_map);
+
+
+
+	//display.draw_bitmap(0, 0, 64, 128, zjlogo_map);
+	display.display();
 	printf("App Main\n");
-	vec<str> stringlist;
 	nvs_flash_init();
 	printf("Wifi Init\n");
 	WiFIInit();
 
-
-
-
-
 	esp_log_level_set("*", ESP_LOG_NONE);
 	esp_log_level_set(TAG, ESP_LOG_INFO);
-
-
-
-
-
-
-
 
 	printf("Audio Board Init\n");
 	audio_board_handle_t board_handle = audio_board_init();
@@ -616,8 +834,8 @@ void app_main(void)
 
 
 
-	int player_volume;
-	audio_hal_get_volume(board_handle->audio_hal, &player_volume);
+
+	//audio_hal_get_volume(board_handle->audio_hal, &player_volume);
 
 	//  ESP_LOGI(TAG, "[3.0] Create audio pipeline for playback");
 	audio_pipeline_cfg_t pipeline_cfg = DEFAULT_AUDIO_PIPELINE_CONFIG();
@@ -649,19 +867,8 @@ void app_main(void)
 
 
 	i2s_cfg.i2s_port = (i2s_port_t)0;//
-	//i2s_stream_cfg_t i2s_cfg_read = i2s_cfg;
-
-	//i2s_cfg.type = AUDIO_STREAM_WRITER;
 	i2s_stream_writer = i2s_stream_init(&i2s_cfg);
 
-	//	i2s_stream_cfg_t i2s_cfg = I2S_STREAM_CFG_DEFAULT();
-	//	i2s_cfg.type = AUDIO_STREAM_WRITER;
-	//	i2s_stream_writer = i2s_stream_init(&i2s_cfg);
-
-
-		//i2s_cfg_read.type = AUDIO_STREAM_WRITER;
-		//MyDSP = i2s_stream_init(&i2s_cfg_read);
-		//audio_element_set_write_cb(MyDSP, i2s_input_write_cb, 0);
 	printf("Mp3 Codec init\n");
 	mp3_decoder_cfg_t mp3_cfg = DEFAULT_MP3_DECODER_CONFIG();
 	flac_decoder_cfg_t flac_cfg = DEFAULT_FLAC_DECODER_CONFIG();
@@ -671,18 +878,25 @@ void app_main(void)
 	flac_cfg.out_rb_size = (32 * 1024);
 	mp3_decoder = mp3_decoder_init(&mp3_cfg);
 	flac_decoder = flac_decoder_init(&flac_cfg);
-	/*
-		audio_decoder_t auto_decode[2];
 
-		auto_decode[0].decoder_open = (void* (*)(audio_element_handle_t)) mp3_decoder_open;
-		auto_decode[0].decoder_process = (void* (*)(audio_element_handle_t))mp3_decoder_process;
-		auto_decode[0].decoder_close = (void* (*)(audio_element_handle_t))mp3_decoder_close;
-		auto_decode[0].decoder_type = ESP_CODEC_TYPE_MP3;
-		auto_decode[1].decoder_open = (void* (*)(audio_element_handle_t))flac_decoder_open;
-		auto_decode[1].decoder_process = (void* (*)(audio_element_handle_t))flac_decoder_process;
-		auto_decode[1].decoder_close = (void* (*)(audio_element_handle_t))flac_decoder_close;
-		auto_decode[1].decoder_type = ESP_CODEC_TYPE_RAWFLAC;
-		*/
+	audio_element_cfg_t DspCfg;// = DEFAULT_AUDIO_ELEMENT_CONFIG();
+	memset(&DspCfg, 0, sizeof(audio_element_cfg_t));
+	DspCfg.destroy = Dsp_destroy;
+	DspCfg.process = Dsp_process;
+	DspCfg.read = Dsp_read;
+	DspCfg.write = Dsp_write;
+	DspCfg.open = Dsp_open;
+	DspCfg.close = Dsp_close;
+	DspCfg.buffer_len = (4096);
+	DspCfg.tag = "Dsp";
+	DspCfg.task_stack = (2 * 1024);
+	DspCfg.task_prio = (5);
+	DspCfg.task_core = (0);
+	DspCfg.out_rb_size = (8 * 1024);
+
+	DspProcessor = audio_element_init(&DspCfg);
+	audio_element_info_t info = { 0 };
+	audio_element_setinfo(DspProcessor, &info);
 	printf("Audio element Callbacks\n");
 	audio_element_set_read_cb(mp3_decoder, my_sdcard_read_cb, 0);
 	audio_element_set_read_cb(flac_decoder, my_sdcard_read_cb, 0);
@@ -690,6 +904,7 @@ void app_main(void)
 
 	audio_pipeline_register(pipeline, mp3_decoder, "mp3Decoder");
 	audio_pipeline_register(pipeline, flac_decoder, "flacDecoder");
+	audio_pipeline_register(pipeline, DspProcessor, "DspProcessor");
 	audio_pipeline_register(pipeline, i2s_stream_writer, "i2s");
 
 
@@ -733,12 +948,18 @@ void app_main(void)
 	gpio_set_direction((gpio_num_t)BLINK_GPIO_GREEN, (gpio_mode_t)GPIO_MODE_OUTPUT);
 	gpio_set_level((gpio_num_t)BLINK_GPIO_GREEN, (gpio_num_t)1);
 	bool AllowChange = false;
+	TimerHandle_t tmr;
+	int id = 1;
+	int interval = 1000 / fps;
+	tmr = xTimerCreate("Oled", pdMS_TO_TICKS(interval), pdTRUE, (void *)id, &display_timer_handler);
+	if (xTimerStart(tmr, 10) != pdPASS)
+		{
+		printf("Timer start error");
+		}
+
+	//	esp_periph_start_timer((esp_periph_handle_t)sdcard_handle, 1000 / portTICK_RATE_MS, display_timer_handler);
 	while (1)
 		{
-		/* Handle event interface messages from pipeline
-		   to set music info and to advance to the next song
-		*/
-		//vTaskDelay(10);
 		audio_event_iface_msg_t msg;
 		esp_err_t ret = audio_event_iface_listen(evt, &msg, portMAX_DELAY);
 
@@ -784,13 +1005,9 @@ void app_main(void)
 					if (el_state != 3)
 						{
 						i2s_stream_set_clk(i2s_stream_writer, music_info.sample_rates, music_info.bits, music_info.channels);
-						//printf("I2S Stream Changed! Sample Rate: %d Bits: %d Channels: %d Bytes: %lld \n", music_info.sample_rates, music_info.bits, music_info.channels, music_info.total_bytes);
-
-						//done = true;
 						}
 				continue;
 				}
-#define ERRCHECK(xxx) if (xxx==ESP_FAIL) {printf("Error %s Line:%d\n",#xxx,__LINE__);}
 			// Advance to the next song when previous finishes
 			if (msg.source == (void *)i2s_stream_writer && msg.cmd == AEL_MSG_CMD_REPORT_STATUS)
 				{
@@ -821,6 +1038,12 @@ void app_main(void)
 		if (AllowChange)
 			if (msg.cmd == PERIPH_BUTTON_RELEASE && msg.source_type == PERIPH_ID_BUTTON)
 				{
+				if (DisplayOn < 0)
+					{
+					DisplayOn = DisplayTimeout;
+					continue;
+					}
+				DisplayOn = DisplayTimeout;
 				if ((int)msg.data == get_input_set_id())
 					{
 					Mp3StackPos = (Mp3StackPos - 1) & (Mp3StackSize - 1);
@@ -836,19 +1059,23 @@ void app_main(void)
 				if ((int)msg.data == get_input_rec_id())
 					{
 
-					static bool Pause = false;
-					Pause = !Pause;
-					if (Pause)
-						audio_pipeline_pause(pipeline);
-					else
-						audio_pipeline_resume(pipeline);
+					tsx = (int)(tsx - 128);
+					if (tsx < 0) tsx = 5 * 128;
+
+					//SongPause = !SongPause;
+					//if (SongPause)
+					//	audio_pipeline_pause(pipeline);
+					//else
+					//	audio_pipeline_resume(pipeline);
 					}
 
 				if ((int)msg.data == get_input_mode_id())
 					{
-					Mp3StackPos = (Mp3StackPos + 1) & (Mp3StackSize - 1);
-					Mp3Stack[Mp3StackPos] = esp_random() % Mp3Files.size();
-					audio_pipeline_stop(pipeline);
+					tsx = (int)(tsx + 128);
+					if (tsx >= (6 * 128)) tsx = 0;
+					//Mp3StackPos = (Mp3StackPos + 1) & (Mp3StackSize - 1);
+					//Mp3Stack[Mp3StackPos] = esp_random() % Mp3Files.size();
+					//audio_pipeline_stop(pipeline);
 					}
 
 				if ((int)msg.data == get_input_volup_id())
@@ -856,6 +1083,7 @@ void app_main(void)
 					player_volume += 1;
 					if (player_volume > 100)
 						player_volume = 100;
+					//DisplayStatus();
 					audio_hal_set_volume(board_handle->audio_hal, player_volume);
 					}
 				if ((int)msg.data == get_input_voldown_id())
@@ -863,6 +1091,7 @@ void app_main(void)
 					player_volume -= 1;
 					if (player_volume < 0)
 						player_volume = 0;
+					//DisplayStatus();
 					audio_hal_set_volume(board_handle->audio_hal, player_volume);
 					}
 				}

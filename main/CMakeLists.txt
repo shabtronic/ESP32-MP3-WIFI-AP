@@ -4,5 +4,5 @@
 #set(COMPONENT_REQUIRES )
 #set(COMPONENT_PRIV_REQUIRES )
 
-set(COMPONENT_SRCS ./Mp3Wifi.cpp)
+set(COMPONENT_SRCS "./Mp3Wifi.cpp" "oled.cpp")
 register_component()
